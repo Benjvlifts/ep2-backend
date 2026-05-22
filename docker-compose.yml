@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # Servicio: API Backend (Node.js + Express)
+  # ==========================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ep2-backend:latest
+    container_name: innovatech-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-innovatech}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - innovatech-network
+
+  # ==========================================
+  # Servicio: Base de datos PostgreSQL
+  # ==========================================
+  db:
+    image: postgres:15-alpine
+    container_name: innovatech-db
+    environment:
+      - POSTGRES_DB=${DB_NAME:-innovatech}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres123}
+    ports:
+      - "5432:5432"
+    # VOLUMEN NAMED: los datos persisten aunque el contenedor se elimine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-innovatech}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - innovatech-network
+
+# ==========================================
+# Volúmenes: Persistencia de datos
+# Usamos named volume (no bind mount) porque:
+# - Es gestionado por Docker (más portable)
+# - No depende de la ruta del host
+# - Mejor rendimiento en producción
+# ==========================================
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  innovatech-network:
+    driver: bridge

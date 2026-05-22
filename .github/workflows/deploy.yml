@@ -1,0 +1,121 @@
+name: CI/CD Backend - Innovatech Chile
+
+on:
+  push:
+    branches:
+      - deploy
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY: ep2-backend
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    name: Build, Push y Deploy Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build y Push imagen a ECR
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Deploy en EC2 Backend
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST_BACKEND }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Configurar credenciales AWS en la EC2
+            aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws configure set aws_session_token ${{ secrets.AWS_SESSION_TOKEN }}
+            aws configure set default.region ${{ env.AWS_REGION }}
+
+            # Login a ECR
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+            # Descargar imágenes
+            docker pull ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+
+            # Ir al directorio del proyecto (o crearlo)
+            mkdir -p /home/ec2-user/innovatech-backend
+            cd /home/ec2-user/innovatech-backend
+
+            # Crear docker-compose.yml en la EC2
+            cat > docker-compose.yml << 'EOF'
+            version: '3.8'
+            services:
+              backend:
+                image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+                container_name: innovatech-backend
+                ports:
+                  - "3001:3001"
+                environment:
+                  - PORT=3001
+                  - DB_HOST=db
+                  - DB_PORT=5432
+                  - DB_NAME=innovatech
+                  - DB_USER=postgres
+                  - DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+                  - FRONTEND_URL=http://${{ secrets.EC2_HOST_FRONTEND }}
+                depends_on:
+                  db:
+                    condition: service_healthy
+                restart: unless-stopped
+                networks:
+                  - innovatech-network
+              db:
+                image: postgres:15-alpine
+                container_name: innovatech-db
+                environment:
+                  - POSTGRES_DB=innovatech
+                  - POSTGRES_USER=postgres
+                  - POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }}
+                volumes:
+                  - postgres_data:/var/lib/postgresql/data
+                healthcheck:
+                  test: ["CMD-SHELL", "pg_isready -U postgres -d innovatech"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+                restart: unless-stopped
+                networks:
+                  - innovatech-network
+            volumes:
+              postgres_data:
+                driver: local
+            networks:
+              innovatech-network:
+                driver: bridge
+            EOF
+
+            # Levantar los servicios
+            docker-compose down || true
+            docker-compose up -d
+
+            echo "✅ Backend desplegado correctamente"
+            docker-compose ps
